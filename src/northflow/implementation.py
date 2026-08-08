@@ -1,4 +1,4 @@
-"""Реализация задачи: preflight → lock → developer → проверки → review → commit → state."""
+"""Полный цикл задачи: preflight → снимок → lock → developer → проверки → review → commit → отчёт."""
 from __future__ import annotations
 
 import asyncio
@@ -7,11 +7,12 @@ import subprocess
 from pathlib import Path
 
 from .agent import AgentRun
-from .checks import PreflightError, preflight
+from .checks import PreflightError, preflight, scan_files_for_forbidden
 from .config import RuntimeConfig
 from .locks import WriterLock
 from .roles import ROLE_PROMPTS
-from .state import ProjectState, Task
+from .snapshot import diff_snapshots, save_report, snapshot_tree
+from .state import ProjectState, Task, write_roadmap
 from .tools import ToolExecutor
 
 DEFAULT_CHECK_COMMANDS = [
@@ -19,6 +20,8 @@ DEFAULT_CHECK_COMMANDS = [
     ("format", "ruff format --check ."),
     ("test", "pytest -q"),
 ]
+
+MAX_FIX_CYCLES = 3
 
 
 class TaskEngine:
@@ -36,6 +39,8 @@ class TaskEngine:
         lock = WriterLock(self.root)
         if not lock.acquire(task.id, task.stage_id or 0):
             raise PreflightError("Writer lock held: another writer is active.")
+
+        before = snapshot_tree(self.root)
         try:
             role = self.cfg.roles["developer"]
             tools = ToolExecutor(
@@ -48,20 +53,37 @@ class TaskEngine:
             user = (
                 f"Задача {task.id}: {task.title}\n\n{task.description}\n\n"
                 f"Разрешённые пути: {role.allowed_paths}\n"
-                f"Файлы по плану: {', '.join(task.files) or '(не заданы)'}"
+                f"Файлы по плану: {', '.join(task.files) or '(не заданы)'}\n"
+                "Если задача противоречит архитектуре — сначала вызови critical_change и не пиши код."
             )
             run = AgentRun(self.client, role, self.root, sys_prompt, user, tools)
             result = asyncio.run(run.run())
             meta = {"requests": run.requests, "tokens": run.total_tokens}
+
+            after = snapshot_tree(self.root)
+            diff = diff_snapshots(before, after)
 
             checks = {}
             if run_checks:
                 for name, cmd in DEFAULT_CHECK_COMMANDS:
                     checks[name] = self._run_check(name, cmd)
 
-            return {"result": result, "meta": meta, "checks": checks}
+            forbidden = self._scan_changed_files(diff)
+
+            return {
+                "result": result,
+                "meta": meta,
+                "diff": diff,
+                "checks": checks,
+                "forbidden": forbidden,
+                "critical_change": tools.critical_change,
+            }
         finally:
             lock.release()
+
+    def _scan_changed_files(self, diff: dict) -> dict[str, list[str]]:
+        changed = list(diff.get("created", {}).keys()) + list(diff.get("changed", {}).keys())
+        return scan_files_for_forbidden(self.root, changed)
 
     def _run_check(self, name: str, cmd: str) -> str:
         try:
@@ -100,3 +122,53 @@ class TaskEngine:
             return f"commit failed: {res.stderr[:500]}"
         except Exception as e:
             return f"commit error: {e}"
+
+    def complete_task_cycle(self, task: Task) -> dict:
+        """Полный цикл: реализация → проверки → (исправления до 3) → review → commit → roadmap."""
+        cycle = {"attempts": 0, "steps": []}
+        for attempt in range(1, MAX_FIX_CYCLES + 1):
+            cycle["attempts"] = attempt
+            out = self.run_task(task, run_checks=True)
+            cycle["steps"].append(out)
+
+            if out.get("critical_change"):
+                task.status = "blocked"
+                self.state.answers[f"critical:{task.id}"] = out["critical_change"]["question"]
+                self.state.save()
+                cycle["status"] = "critical_change"
+                return cycle
+
+            if out.get("forbidden"):
+                # Запрещённые паттерны — сразу блок, не тратим циклы на «исправь ещё раз».
+                task.status = "blocked"
+                self.state.save()
+                cycle["status"] = "forbidden"
+                return cycle
+
+            if self._checks_passed(out.get("checks", {})):
+                break
+            # Не прошли проверки — ещё один цикл разработчика.
+        else:
+            task.status = "blocked"
+            self.state.save()
+            cycle["status"] = "checks_failed"
+            return cycle
+
+        review = self.run_review(task)
+        cycle["review"] = review
+        cycle["commit"] = self.commit_task(task)
+        task.status = "done"
+        task.completed_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+        write_roadmap(self.state)
+        self.state.save()
+        cycle["status"] = "done"
+        return cycle
+
+    @staticmethod
+    def _checks_passed(checks: dict) -> bool:
+        if not checks:
+            return True
+        for name, out in checks.items():
+            if "exit=0" not in out:
+                return False
+        return True

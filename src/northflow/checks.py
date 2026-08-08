@@ -23,6 +23,23 @@ DANGEROUS_COMMANDS = [
     r":\(\)\s*\{",
 ]
 
+# Файлы, где запрещённые паттерны допустимы (тесты, скрипты сборки, generated).
+ALLOWED_FILE_MARKERS = (
+    ".test.ts",
+    ".spec.ts",
+    ".test.js",
+    ".spec.js",
+    ".test.py",
+    "_test.py",
+    ".generated.ts",
+    ".generated.js",
+    "scripts/",
+    "migrations/",
+)
+
+# Строки, где запрещённый паттерн не блокирует (TODO/FIXME на удаление).
+ALLOWED_LINE_MARKERS = ("FIXME", "TODO: убрать", "TODO: remove")
+
 
 class PreflightError(Exception):
     pass
@@ -73,12 +90,43 @@ def check_scope(path: Path, allowed: list[Path]) -> bool:
         return False
 
 
-def scan_forbidden(text: str) -> list[str]:
-    hits = []
-    for pattern in FORBIDDEN_PATTERNS:
-        if re.search(pattern, text):
-            hits.append(pattern)
+def is_allowed_scan_path(rel_path: str) -> bool:
+    """Исключения для сканера: тесты, scripts, generated, миграции."""
+    p = rel_path.replace("\\", "/").lower()
+    return any(marker.lower() in p for marker in ALLOWED_FILE_MARKERS)
+
+
+def scan_forbidden(text: str, file_path: str | None = None) -> list[str]:
+    """Возвращает запрещённые паттерны. Для allowed-файлов и строк FIXME/TODO — пропускает."""
+    if file_path and is_allowed_scan_path(file_path):
+        return []
+    hits: list[str] = []
+    for line_no, line in enumerate(text.splitlines(), 1):
+        if file_path and any(marker in line for marker in ALLOWED_LINE_MARKERS):
+            continue
+        for pattern in FORBIDDEN_PATTERNS:
+            if re.search(pattern, line):
+                hits.append(f"{pattern} (строка {line_no})")
     return hits
+
+
+def scan_files_for_forbidden(root: Path, paths: list[str]) -> dict[str, list[str]]:
+    """Сканирует список файлов и возвращает {file: [нарушения]}."""
+    result: dict[str, list[str]] = {}
+    for rel in paths:
+        p = Path(rel)
+        if not p.is_absolute():
+            p = root / p
+        if not p.exists() or not p.is_file():
+            continue
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            continue
+        hits = scan_forbidden(text, file_path=rel)
+        if hits:
+            result[rel] = hits
+    return result
 
 
 def check_command(command: str) -> str | None:

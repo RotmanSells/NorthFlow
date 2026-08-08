@@ -1,4 +1,4 @@
-"""Агентский цикл: инструменты, лимиты запросов/времени, output-first."""
+"""Агентский цикл: инструменты, лимиты, детектор зацикливания/бесполезности."""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,18 @@ from .tools import ToolExecutor
 
 
 class AgentRun:
-    """Выполнение одной роли до finish / лимита."""
+    """Выполнение одной роли до finish / лимита.
+
+    Стоп-условия:
+    - роль явно завершилась через finish;
+    - модель вернула финальный текст;
+    - исчерпан бюджет запросов/времени (PARTIAL);
+    - сработал детектор бесполезности/зацикливания (STUCK).
+    """
+
+    LOOP_WINDOW = 6          # сколько последних сигнатур смотрим
+    LOOP_THRESHOLD = 4       # столько одинаковых подряд — зацикливание
+    IDLE_TOOL_LIMIT = 12     # столько вызовов подряд без полезного результата
 
     def __init__(
         self,
@@ -33,6 +44,9 @@ class AgentRun:
         self.total_tokens = 0
         self.started_at = time.monotonic()
         self.log: list[dict] = []
+        self._recent_signatures: list[str] = []
+        self._useful_tool_count = 0
+        self._useless_streak = 0
 
     @property
     def elapsed(self) -> float:
@@ -45,6 +59,26 @@ class AgentRun:
             return f"PARTIAL: role time limit reached ({int(self.elapsed)}s) with result so far."
         return None
 
+    def _mark_tool_used(self, result: str) -> None:
+        """Считаем инструмент полезным, если он что-то изменил/принёс данные, а не просто ошибся."""
+        if result.startswith("Ошибка:") or result == "(нет вывода)" or result == "Роль завершена.":
+            self._useless_streak += 1
+        else:
+            self._useless_streak = 0
+            self._useful_tool_count += 1
+        if self._useless_streak >= self.IDLE_TOOL_LIMIT:
+            return
+
+    def _detect_stuck(self, signature: str) -> bool:
+        """Зацикливание: одни и те же вызовы подряд."""
+        self._recent_signatures.append(signature)
+        self._recent_signatures = self._recent_signatures[-self.LOOP_WINDOW:]
+        if len(self._recent_signatures) >= self.LOOP_THRESHOLD:
+            last = self._recent_signatures[-self.LOOP_THRESHOLD:]
+            if len(set(last)) == 1:
+                return True
+        return False
+
     async def run(self) -> str:
         messages = [{"role": "system", "content": self.system_prompt}]
         messages.append({"role": "user", "content": self.user_message})
@@ -55,6 +89,13 @@ class AgentRun:
             if limit_msg:
                 self.log.append({"event": "limit", "message": limit_msg})
                 return limit_msg
+            if self._useless_streak >= self.IDLE_TOOL_LIMIT:
+                msg = (
+                    f"STUCK: роль не приносит результата ({self._useless_streak} "
+                    "инструментов подряд без полезного эффекта)."
+                )
+                self.log.append({"event": "stuck", "message": msg})
+                return msg
 
             try:
                 resp = await self.client.chat(
@@ -102,6 +143,12 @@ class AgentRun:
                     "content": result,
                 })
                 self.log.append({"event": "tool", "tool": tc.name, "args": tc.arguments, "result": result[:500]})
+                self._mark_tool_used(result)
+                sig = json.dumps({"n": tc.name, "a": tc.arguments}, sort_keys=True, ensure_ascii=False)
+                if self._detect_stuck(sig):
+                    msg = "STUCK: роль повторяет одинаковые вызовы (зацикливание)."
+                    self.log.append({"event": "stuck", "message": msg})
+                    return msg
                 if tc.name == "finish":
                     payload = self.tools.finish_payload or {"result": result}
                     self.log.append({"event": "finish", "payload": payload})

@@ -1,4 +1,4 @@
-"""Инструменты агента с жёстким scope-контролем на уровне записи."""
+"""Инструменты агента с жёстким scope-контролем и critical_change."""
 from __future__ import annotations
 
 import asyncio
@@ -39,6 +39,12 @@ TOOL_DEFS = {
     "memory_store": _tool("memory_store", "Сохранить факт в память проекта.", {"key": {"type": "string"}, "value": {"type": "string"}}, ["key", "value"]),
     "memory_recall": _tool("memory_recall", "Вспомнить факт из памяти проекта.", {"query": {"type": "string"}}, ["query"]),
     "finish": _tool("finish", "Завершить роль со structured-результатом в JSON.", {"result": {"type": "string"}}, ["result"]),
+    "critical_change": _tool(
+        "critical_change",
+        "Остановиться и спросить человека, если задача противоречит документации/архитектуре.",
+        {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "description": "Варианты ответа"}},
+        ["question"],
+    ),
 }
 
 WRITE_TOOLS = {"write_file", "append_file", "code_edit"}
@@ -64,6 +70,7 @@ class ToolExecutor:
         self._http = httpx.AsyncClient(timeout=30)
         self.events: list[dict] = []
         self.finish_payload: dict | None = None
+        self.critical_change: dict | None = None
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -115,6 +122,12 @@ class ToolExecutor:
                 except json.JSONDecodeError:
                     self.finish_payload = {"result": args.get("result", "")}
                 return "Роль завершена."
+            if name == "critical_change":
+                self.critical_change = {
+                    "question": args.get("question", ""),
+                    "options": args.get("options") or [],
+                }
+                return "КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: задача остановлена, ждём ответа человека."
             return f"Неизвестный инструмент: {name}"
         except ToolError as e:
             return f"Ошибка: {e}"

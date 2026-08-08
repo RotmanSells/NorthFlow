@@ -1,4 +1,4 @@
-"""Планирование: парсинг этапов и задач из markdown, запись в state."""
+"""Планирование: парсинг этапов и задач, проверка полноты плана."""
 from __future__ import annotations
 
 import re
@@ -7,11 +7,14 @@ from pathlib import Path
 from .state import ProjectState, Stage, Task
 
 
+class PlanError(Exception):
+    pass
+
+
 def parse_stages_file(md: str) -> list[dict]:
     """Парсит блоки '## Stage N: Title' → [{'id', 'title', 'description', 'tasks_md'}]."""
     stages = []
     blocks = re.split(r"(?m)^##\s+Stage\s+(\d+)[:\-]\s+(.+)$", md)
-    # ["preamble", "1", "title1", "body1", "2", "title2", "body2", ...]
     for i in range(1, len(blocks), 3):
         try:
             sid = int(blocks[i])
@@ -19,9 +22,7 @@ def parse_stages_file(md: str) -> list[dict]:
             continue
         title = blocks[i + 1].strip()
         body = blocks[i + 2] if i + 2 < len(blocks) else ""
-        # Задачи внутри этого блока
-        tasks_md = body
-        stages.append({"id": sid, "title": title, "body": tasks_md})
+        stages.append({"id": sid, "title": title, "body": body})
     return stages
 
 
@@ -39,15 +40,37 @@ def parse_tasks_from_stage(md: str, stage_id: int, start_id: int = 1) -> list[Ta
         body = blocks[i + 2] if i + 2 < len(blocks) else ""
         desc_m = re.search(r"(?m)^\*\*Description:\*\*\s*(.*)$", body, re.DOTALL)
         files = re.findall(r"(?m)^-\s*`([^`]+)`", body)
+        tests_m = re.findall(r"(?m)^-\s*`(tests?[^`]*)`", body, re.IGNORECASE)
         tasks.append(Task(
             id=nid,
             title=title,
             description=desc_m.group(1).strip() if desc_m else body.strip(),
             stage_id=stage_id,
             files=files,
+            tests=tests_m,
         ))
         nid += 1
     return tasks
+
+
+def validate_plan(state: ProjectState) -> list[str]:
+    """Проверяет план: у этапов критерии, у задач title/description/files/tests."""
+    errors = []
+    for s in state.stages:
+        if not s.title:
+            errors.append(f"Этап {s.id}: нет названия.")
+        if not s.description or len(s.description.strip()) < 10:
+            errors.append(f"Этап {s.id}: нет описания/критериев готовности.")
+        for t in s.tasks:
+            if not t.title:
+                errors.append(f"Этап {s.id}, задача {t.id}: нет названия.")
+            if not t.description or len(t.description.strip()) < 20:
+                errors.append(f"Этап {s.id}, задача {t.id}: нет описания.")
+            if not t.files:
+                errors.append(f"Этап {s.id}, задача {t.id}: нет списка файлов.")
+            if not t.tests:
+                errors.append(f"Этап {s.id}, задача {t.id}: нет списка тестов.")
+    return errors
 
 
 def import_plan(state: ProjectState, stages_file: Path) -> int:
@@ -62,7 +85,6 @@ def import_plan(state: ProjectState, stages_file: Path) -> int:
         else:
             existing.title = s["title"]
             existing.description = s["body"][:500]
-        # Сохранить в папку этапа
         stage_dir = state.root / "stages" / f"{idx:02d}"
         stage_dir.mkdir(parents=True, exist_ok=True)
         (stage_dir / "README.md").write_text(

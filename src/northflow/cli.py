@@ -92,7 +92,6 @@ def run(project_dir: str, config: str | None):
             qs = questions_from_result(step["result"])
             if qs:
                 ask_questions(state, qs)
-                # После ответов прогоняем архитектора ещё раз с ответами в контексте
                 step = cmd_step(client, cfg, state, "architect",
                     "Продолжи: с учётом ответов заверши документацию.")
                 print("АРХИТЕКТУРА (финал):", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
@@ -113,12 +112,12 @@ def run(project_dir: str, config: str | None):
             if not task:
                 print("Все задачи этапа завершены. Закрой этап вручную в state.")
                 return
-            print(f"РЕАЛИЗАЦИЯ задачи {task.id}: {task.title}")
             from .implementation import TaskEngine
             eng = TaskEngine(state, cfg, client)
-            out = eng.run_task(task, run_checks=False)
-            print("РЕЗУЛЬТАТ:", json.dumps(out, ensure_ascii=False, indent=2)[:3000])
-            # TODO: review и обновление state/roadmap после фикса API
+            cycle = eng.complete_task_cycle(task)
+            print("ЦИКЛ ЗАДАЧИ:", json.dumps(cycle, ensure_ascii=False, indent=2)[:4000])
+            if cycle.get("status") == "critical_change":
+                print("Задача остановлена: нужен ответ человека.")
         elif state.phase == "review":
             preflight_or_stop(state, cfg)
             task = state.next_task()
