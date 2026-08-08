@@ -1,4 +1,4 @@
-"""CLI FlowPilot: init / status / questions / run / next."""
+"""CLI FlowPilot: init / status / preflight / run / questions."""
 from __future__ import annotations
 
 import asyncio
@@ -10,9 +10,10 @@ import click
 
 from .checks import PreflightError, preflight
 from .config import RuntimeConfig, load_config, save_config
-from .pipeline import (cmd_step, ensure_commit, make_client, preflight_or_stop,
-                       run_role_prompt, write_roadmap)
+from .human import ask_questions, questions_from_result
+from .pipeline import cmd_step, ensure_commit, make_client, preflight_or_stop
 from .providers import LLMClient
+from .roles import extract_json
 from .state import ProjectState, Stage, Task
 
 
@@ -34,7 +35,7 @@ def init(project_dir: str):
         idea.write_text("# Идея\n\nОпиши здесь, что хочешь создать.\n", encoding="utf-8")
     state = ProjectState.load(root)
     state.save()
-    click.echo(f"FlowPilot initialized in {root}")
+    click.echo(f"FlowPilot инициализирован в {root}")
 
 
 @cli.command()
@@ -68,7 +69,7 @@ def preflight_cmd(project_dir: str, expected_branch: str):
 @click.argument("project_dir", default=".")
 @click.option("--config", default=None, help="Путь к конфигу.")
 def run(project_dir: str, config: str | None):
-    """Прогнать конвейер до текущей фазы."""
+    """Прогнать следующий шаг конвейера."""
     root = Path(project_dir).resolve()
     cfg = load_config(config)
     state = ProjectState.load(root)
@@ -77,46 +78,57 @@ def run(project_dir: str, config: str | None):
     try:
         if state.phase == "idea":
             step = cmd_step(client, cfg, state, "researcher",
-                "Изучи docs/00-idea.md, проведи исследование, составь список вопросов человеку.")
-            print("RESEARCH:", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
-            state.phase = "research"
+                "Изучи docs/00-idea.md, проведи исследование, задай вопросы человеку.")
+            print("ИССЛЕДОВАНИЕ:", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
+            qs = questions_from_result(step["result"])
+            if qs:
+                ask_questions(state, qs)
+            state.phase = "architecture"
             state.save()
-        elif state.phase == "research":
-            print("Фаза research: ответь на вопросы и укажи next phase через CLI (см. README).")
         elif state.phase == "architecture":
             step = cmd_step(client, cfg, state, "architect",
-                "Составь полную документацию и AGENTS.md. Вопросы человеку — если критично.")
-            print("ARCHITECT:", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
+                "Составь полную документацию и AGENTS.md. Если нужны решения — задай вопросы человеку.")
+            print("АРХИТЕКТУРА:", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
+            qs = questions_from_result(step["result"])
+            if qs:
+                ask_questions(state, qs)
+                # После ответов прогоняем архитектора ещё раз с ответами в контексте
+                step = cmd_step(client, cfg, state, "architect",
+                    "Продолжи: с учётом ответов заверши документацию.")
+                print("АРХИТЕКТУРА (финал):", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
             crit = cmd_step(client, cfg, state, "critic",
                 "Проверь созданную архитектуру, дай вердикт.")
-            print("CRITIC:", json.dumps(crit["payload"], ensure_ascii=False, indent=2)[:2000])
+            print("КРИТИК:", json.dumps(crit["payload"], ensure_ascii=False, indent=2)[:2000])
             state.phase = "roadmap"
             state.save()
         elif state.phase == "roadmap":
             step = cmd_step(client, cfg, state, "planner",
                 "Составь этапы и 3-5 детальных задач для первого этапа.")
-            print("PLANNER:", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
-            write_roadmap(state)
+            print("ПЛАНИРОВЩИК:", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
+            state.phase = "implementation"
             state.save()
         elif state.phase == "implementation":
             preflight_or_stop(state, cfg)
             task = state.next_task()
             if not task:
-                print("Все задачи завершены. Этап можно закрыть вручную.")
+                print("Все задачи этапа завершены. Закрой этап вручную в state.")
                 return
-            step = cmd_step(client, cfg, state, "developer",
-                f"Реализуй задачу {task.id}: {task.title}\n{task.description}")
-            print("DEV:", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
-            task.status = "done"
-            task.completed_at = now_iso()
-            state.save()
-            msg = f"task {task.id}: {task.title}"
-            print(ensure_commit(state.root, msg))
+            print(f"РЕАЛИЗАЦИЯ задачи {task.id}: {task.title}")
+            from .implementation import TaskEngine
+            eng = TaskEngine(state, cfg, client)
+            out = eng.run_task(task, run_checks=False)
+            print("РЕЗУЛЬТАТ:", json.dumps(out, ensure_ascii=False, indent=2)[:3000])
+            # TODO: review и обновление state/roadmap после фикса API
         elif state.phase == "review":
             preflight_or_stop(state, cfg)
-            step = cmd_step(client, cfg, state, "reviewer",
-                "Проверь последнюю реализацию. Верни вердикт.")
-            print("REVIEW:", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
+            task = state.next_task()
+            if not task:
+                print("Нет задач для review.")
+                return
+            from .implementation import TaskEngine
+            eng = TaskEngine(state, cfg, client)
+            out = eng.run_review(task)
+            print("REVIEW:", json.dumps(out, ensure_ascii=False, indent=2)[:2000])
         else:
             print(f"Фаза {state.phase} не обрабатывается автоматически.")
     finally:
@@ -127,7 +139,7 @@ def run(project_dir: str, config: str | None):
 @click.argument("project_dir", default=".")
 @click.option("--config", default=None)
 def questions(project_dir: str, config: str | None):
-    """Показать/ввести ответы на вопросы (пока печатает research payload)."""
+    """Показать/ввести ответы на вопросы."""
     root = Path(project_dir).resolve()
     state = ProjectState.load(root)
     click.echo(json.dumps(state.answers, ensure_ascii=False, indent=2) or "(пусто)")
@@ -137,9 +149,10 @@ def questions(project_dir: str, config: str | None):
 @click.argument("project_dir", default=".")
 def roadmap(project_dir: str):
     """Перегенерировать roadmap.md."""
+    from .state import write_roadmap
     state = ProjectState.load(Path(project_dir).resolve())
     write_roadmap(state)
-    click.echo("roadmap.md updated")
+    click.echo("roadmap.md обновлён")
 
 
 if __name__ == "__main__":
