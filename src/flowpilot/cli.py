@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from .checks import PreflightError
+from .checks import PreflightError, preflight
 from .config import RuntimeConfig, load_config, save_config
 from .pipeline import (cmd_step, ensure_commit, make_client, preflight_or_stop,
                        run_role_prompt, write_roadmap)
