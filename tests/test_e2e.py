@@ -4,12 +4,12 @@ import json
 import subprocess
 from pathlib import Path
 
-from flowpilot.agent import AgentRun
-from flowpilot.config import RuntimeConfig
-from flowpilot.implementation import TaskEngine
-from flowpilot.pipeline import make_client
-from flowpilot.state import ProjectState, Stage, Task
-from flowpilot.tools import ToolExecutor
+from northflow.agent import AgentRun
+from northflow.config import RuntimeConfig
+from northflow.implementation import TaskEngine
+from northflow.pipeline import make_client
+from northflow.state import ProjectState, Stage, Task
+from northflow.tools import ToolExecutor
 
 
 class ScriptedClient:
@@ -43,7 +43,7 @@ def make_repo(tmp_path: Path) -> Path:
     (tmp_path / "AGENTS.md").write_text("rules", encoding="utf-8")
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "00-idea.md").write_text("# Идея\nApp", encoding="utf-8")
-    (tmp_path / ".flowpilot.json").write_text(json.dumps({"phase": "roadmap", "stages": [
+    (tmp_path / ".northflow.json").write_text(json.dumps({"phase": "roadmap", "stages": [
         {"id": 1, "title": "Auth", "description": "", "status": "in_progress", "tasks": [
             {"id": 1, "title": "Login", "description": "make login", "status": "todo", "stage_id": 1, "files": [], "tests": [], "notes": "", "created_at": "", "completed_at": ""}
         ]}
@@ -69,7 +69,7 @@ def test_e2e_scope_and_commit(tmp_path: Path):
     assert not (root.parent / "evil.py").exists()
     assert "done" in out["result"]
     # lock released
-    assert not (root / ".flowpilot.lock").exists()
+    assert not (root / ".northflow.lock").exists()
 
     # commit
     msg = eng.commit_task(task)

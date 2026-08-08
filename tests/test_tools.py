@@ -1,6 +1,6 @@
 from pathlib import Path
 import asyncio
-from flowpilot.tools import ToolExecutor
+from northflow.tools import ToolExecutor
 
 def test_scope_block(tmp_path: Path):
     ex = ToolExecutor(tmp_path, allowed_paths=["."])

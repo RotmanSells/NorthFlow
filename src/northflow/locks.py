@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-LOCK_FILENAME = ".flowpilot.lock"
+LOCK_FILENAME = ".northflow.lock"
 
 
 class WriterLock:

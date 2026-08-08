@@ -1,9 +1,9 @@
 import asyncio
 from pathlib import Path
 
-from flowpilot.config import RuntimeConfig, RoleConfig, RoleBudget
-from flowpilot.implementation import TaskEngine
-from flowpilot.state import ProjectState, Stage, Task
+from northflow.config import RuntimeConfig, RoleConfig, RoleBudget
+from northflow.implementation import TaskEngine
+from northflow.state import ProjectState, Stage, Task
 
 
 class FakeDoneClient:
@@ -19,7 +19,7 @@ def test_task_engine_locks_and_finish(tmp_path: Path):
     cfg = RuntimeConfig()
     (tmp_path / "AGENTS.md").write_text("rules")
     (tmp_path / "docs").mkdir()
-    from flowpilot.checks import git_state
+    from northflow.checks import git_state
     state = ProjectState.load(tmp_path)
     stage = Stage(id=1, title="S", description="", status="in_progress")
     stage.tasks.append(Task(id=1, title="T", description="d"))
@@ -32,4 +32,4 @@ def test_task_engine_locks_and_finish(tmp_path: Path):
     eng = TaskEngine(state, cfg, FakeDoneClient())
     out = eng.run_task(state.stages[0].tasks[0], run_checks=False)
     assert "done" in out["result"]
-    assert not (tmp_path / ".flowpilot.lock").exists()
+    assert not (tmp_path / ".northflow.lock").exists()

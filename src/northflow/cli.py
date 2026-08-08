@@ -1,4 +1,4 @@
-"""CLI FlowPilot: init / status / preflight / run / questions."""
+"""CLI NorthFlow: init / status / preflight / run / questions."""
 from __future__ import annotations
 
 import asyncio
@@ -25,7 +25,7 @@ def cli():
 @cli.command()
 @click.argument("project_dir", default=".")
 def init(project_dir: str):
-    """Создать структуру FlowPilot в папке проекта."""
+    """Создать структуру NorthFlow в папке проекта."""
     root = Path(project_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
     (root / "docs").mkdir(exist_ok=True)
@@ -35,7 +35,7 @@ def init(project_dir: str):
         idea.write_text("# Идея\n\nОпиши здесь, что хочешь создать.\n", encoding="utf-8")
     state = ProjectState.load(root)
     state.save()
-    click.echo(f"FlowPilot инициализирован в {root}")
+    click.echo(f"NorthFlow инициализирован в {root}")
 
 
 @cli.command()

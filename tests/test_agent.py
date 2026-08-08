@@ -1,9 +1,9 @@
 import asyncio
 from pathlib import Path
 
-from flowpilot.agent import AgentRun
-from flowpilot.config import RoleConfig, RoleBudget
-from flowpilot.providers import LLMClient, ChatResponse, ToolCall
+from northflow.agent import AgentRun
+from northflow.config import RoleConfig, RoleBudget
+from northflow.providers import LLMClient, ChatResponse, ToolCall
 
 
 class FakeClient:

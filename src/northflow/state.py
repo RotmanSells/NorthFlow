@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-STATE_FILENAME = ".flowpilot.json"
+STATE_FILENAME = ".northflow.json"
 ROADMAP_FILENAME = "roadmap.md"
 
 PIPELINE_PHASES = (

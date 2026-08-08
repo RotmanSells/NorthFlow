@@ -1,7 +1,7 @@
 from pathlib import Path
 import json
-from flowpilot.human import questions_from_result, _render_question
-from flowpilot.state import ProjectState
+from northflow.human import questions_from_result, _render_question
+from northflow.state import ProjectState
 
 def test_questions_from_payload():
     text = json.dumps({"research": "x", "questions": [

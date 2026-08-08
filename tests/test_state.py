@@ -1,5 +1,5 @@
 from pathlib import Path
-from flowpilot.state import ProjectState, Stage, Task, parse_task_blocks, write_roadmap
+from northflow.state import ProjectState, Stage, Task, parse_task_blocks, write_roadmap
 
 def test_state_roundtrip(tmp_path: Path):
     p = ProjectState.load(tmp_path)

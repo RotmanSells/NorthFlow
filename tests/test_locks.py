@@ -1,5 +1,5 @@
 from pathlib import Path
-from flowpilot.locks import WriterLock
+from northflow.locks import WriterLock
 
 def test_lock_exclusive(tmp_path: Path):
     a = WriterLock(tmp_path)

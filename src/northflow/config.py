@@ -1,4 +1,4 @@
-"""Конфигурация FlowPilot: провайдеры, роли, бюджеты, workspace, safety."""
+"""Конфигурация NorthFlow: провайдеры, роли, бюджеты, workspace, safety."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[3]
-CONFIG_FILE = Path.home() / ".flowpilot" / "config.json"
+CONFIG_FILE = Path.home() / ".northflow" / "config.json"
 
 
 @dataclass

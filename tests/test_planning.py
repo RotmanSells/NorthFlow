@@ -1,6 +1,6 @@
 from pathlib import Path
-from flowpilot.planning import import_plan, import_tasks_for_stage
-from flowpilot.state import ProjectState, Stage
+from northflow.planning import import_plan, import_tasks_for_stage
+from northflow.state import ProjectState, Stage
 
 def test_import_plan(tmp_path: Path):
     (tmp_path / "stages.md").write_text("""# План
