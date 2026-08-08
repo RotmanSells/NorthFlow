@@ -14,6 +14,7 @@ from .human import ask_questions, questions_from_result
 from .pipeline import cmd_step, ensure_commit, make_client, preflight_or_stop
 from .providers import LLMClient
 from .roles import extract_json
+from .planning import validate_plan
 from .state import ProjectState, Stage, Task
 
 
@@ -104,6 +105,11 @@ def run(project_dir: str, config: str | None):
             step = cmd_step(client, cfg, state, "planner",
                 "Составь этапы и 3-5 детальных задач для первого этапа.")
             print("ПЛАНИРОВЩИК:", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
+            errors = validate_plan(state)
+            if errors:
+                print("ПЛАН НЕ ПОЛНЫЙ:", "\n".join(errors[:20]))
+                print("Сначала исправь план, потом снова northflow run.")
+                return
             state.phase = "implementation"
             state.save()
         elif state.phase == "implementation":
