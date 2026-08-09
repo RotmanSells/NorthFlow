@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .memory import MemoryDB
+from .sse import StreamSession, sse_event
 from .runner import run_phase_step, submit_answers
 from .state import ProjectState, write_roadmap
 
@@ -64,6 +65,16 @@ PAGE = """<!DOCTYPE html>
   .questions label.selected { background: #1d2f4d; border-color: #3f6fd8; }
   .questions input[type=radio] { margin-right: 8px; }
   .toast { position: fixed; bottom: 18px; right: 18px; background: #1b2230; border: 1px solid #2c3748; padding: 12px 16px; border-radius: 9px; max-width: 420px; font-size: 13px; z-index: 10; display: none; white-space: pre-wrap; }
+  .stream { background:#0c0f15; border:1px solid #1e2634; border-radius:10px; padding:12px 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12.5px; line-height:1.45; max-height:520px; overflow:auto; }
+  .stream .ev { padding:5px 8px; border-left:2px solid transparent; margin:2px 0; border-radius:0 6px 6px 0; }
+  .stream .ev.phase { border-left-color:#6ea8ff; color:#9fc4ff; }
+  .stream .ev.thinking { color:#b9c2d1; }
+  .stream .ev.tool { border-left-color:#e0a83c; color:#ffd28a; }
+  .stream .ev.tool_result { border-left-color:#3ecf8e; color:#a5d8c1; }
+  .stream .ev.tool_result.error { border-left-color:#e05252; color:#ff9d9d; }
+  .stream .ev.error, .stream .ev.stuck, .stream .ev.limit { border-left-color:#e05252; color:#ff9d9d; }
+  .stream .ev.finish { border-left-color:#3ecf8e; color:#7ee2a8; font-weight:600; }
+  .stream .ev.done { border-top:1px solid #263040; color:#9aa3b2; margin-top:8px; }
   .empty { color: #5d6675; padding: 20px 4px; font-size: 14px; }
   .loading { display: none; align-items: center; gap: 10px; color: #9fc4ff; font-size: 14px; }
   .loading.show { display: flex; }
@@ -96,6 +107,7 @@ PAGE = """<!DOCTYPE html>
   </aside>
   <main class="main">
     <div class="card" id="questionsCard" style="display:none"><h3>Вопросы агента</h3><div id="questions" class="questions"></div><button id="btnAnswer" class="primary" style="margin-top:10px">Отправить ответы</button></div>
+    <div class="card"><h3>Живой поток агента</h3><div class="stream" id="stream"></div></div>
     <div class="card"><h3>Последние действия</h3><div id="logList"></div></div>
   </main>
 </div>
@@ -201,13 +213,52 @@ async function sendAnswers(){
     await loadState();
   } catch(e){ toast('Ошибка: '+e, true); }
 }
+function appendStream(type, data){
+  const el = document.getElementById('stream');
+  const div = document.createElement('div');
+  div.className = 'ev ' + type;
+  let txt = '';
+  if (type === 'phase') txt = '▶ Фаза: ' + (data.name || '');
+  else if (type === 'thinking') txt = '💭 Агент думает… (' + (data.request || '') + ')';
+  else if (type === 'tool') txt = '🔧 ' + (data.tool||'') + ' ' + JSON.stringify(data.args||{}).slice(0,300);
+  else if (type === 'tool_result') { txt = (data.is_error ? '⚠️ ' : '✅ ') + (data.tool||'') + ': ' + String(data.result||'').slice(0,500); div.classList.add('error'); }
+  else if (type === 'error') { txt = '❌ Ошибка: ' + (data.message||''); }
+  else if (type === 'stuck') { txt = '🔄 Зацикливание: ' + (data.message||''); }
+  else if (type === 'limit') { txt = '⏹ Лимит: ' + (data.message||''); }
+  else if (type === 'finish') { txt = '✅ Готово: ' + JSON.stringify(data).slice(0,400); }
+  else if (type === 'done') { txt = '🏁 ' + (data.ok ? 'Шаг завершён' : 'Ошибка: ' + (data.message||'')); div.classList.add('done'); }
+  div.textContent = txt;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
 async function runStep(){
   const btn = document.getElementById('btnRun');
   btn.disabled = true;
   document.getElementById('loading').classList.add('show');
+  document.getElementById('stream').innerHTML = '';
+  let res = null;
   try {
-    const res = await api('/api/run', {method:'POST'});
-    toast(res.message || 'Готово');
+    const resp = await fetch('/api/stream');
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while(true){
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream:true});
+      let idx;
+      while((idx = buf.indexOf('\n\n')) >= 0){
+        const chunk = buf.slice(0, idx); buf = buf.slice(idx+2);
+        const line = chunk.split('\n').find(l=>l.startsWith('data: '));
+        if (!line) continue;
+        try {
+          const ev = JSON.parse(line.slice(6));
+          appendStream(ev.type, ev.data);
+          if (ev.type === 'done') res = ev.data;
+        } catch(e){}
+      }
+    }
+    if (res && res.ok) toast('Готово'); else if (res) toast(res.message || 'Ошибка', true); else toast('Поток завершён без результата', true);
   } catch(e){ toast('Ошибка: '+e, true); }
   finally { btn.disabled=false; document.getElementById('loading').classList.remove('show'); await loadState(); await loadMemory(); if(res && res.ok){ beep('done'); notify(res.message ? res.message.slice(0,120) : 'Шаг завершён'); } else if(res){ beep('error'); } }
 }
@@ -311,7 +362,27 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 db.close()
             return
+        if self.path == "/api/stream":
+            self._stream()
+            return
         self._send_json({"error": "not found"}, 404)
+
+    def _stream(self):
+        """SSE: запускает шаг в фоне и отдаёт события клиенту."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        session = StreamSession(self.server.root, self.server.config)
+        session.start()
+        try:
+            for ev in session.events():
+                body = sse_event(ev)
+                self.wfile.write(body.encode("utf-8"))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_POST(self):
         if self.path == "/api/run":

@@ -19,7 +19,7 @@ def _print_banner(title: str, payload: dict, max_len: int = 2000) -> str:
 
 
 def run_phase_step(root: Path, cfg: RuntimeConfig | None = None, state: ProjectState | None = None,
-                   config_path: str | None = None, expected_branch: str = "main") -> dict:
+                   config_path: str | None = None, expected_branch: str = "main", on_event=None) -> dict:
     """Выполняет один шаг конвейера. Возвращает результат для интерфейса.
 
     Если агент задал вопросы — они сохраняются в state.pending_questions,
@@ -34,8 +34,10 @@ def run_phase_step(root: Path, cfg: RuntimeConfig | None = None, state: ProjectS
     try:
         phase = state.phase
         if phase == "idea":
+            if on_event:
+                on_event("phase", {"name": "researcher"})
             step = cmd_step(client, cfg, state, "researcher",
-                "Изучи docs/00-idea.md, проведи исследование, задай вопросы человеку.")
+                "Изучи docs/00-idea.md, проведи исследование, задай вопросы человеку.", on_event=on_event)
             result["message"] = _print_banner("ИССЛЕДОВАНИЕ", step["payload"])
             result["payload"] = step["payload"]
             qs = questions_from_result(step["result"])
@@ -49,8 +51,10 @@ def run_phase_step(root: Path, cfg: RuntimeConfig | None = None, state: ProjectS
                 state.phase = "architecture"
                 state.save()
         elif phase == "architecture":
+            if on_event:
+                on_event("phase", {"name": "architect"})
             step = cmd_step(client, cfg, state, "architect",
-                "Составь полную документацию и AGENTS.md. Если нужны решения — задай вопросы человеку.")
+                "Составь полную документацию и AGENTS.md. Если нужны решения — задай вопросы человеку.", on_event=on_event)
             result["message"] = _print_banner("АРХИТЕКТУРА", step["payload"])
             result["payload"] = step["payload"]
             qs = questions_from_result(step["result"])
@@ -61,14 +65,18 @@ def run_phase_step(root: Path, cfg: RuntimeConfig | None = None, state: ProjectS
                 result["questions"] = qs
                 result["message"] += "\n\nЕсть вопросы — ждём ответа человека."
             else:
+                if on_event:
+                    on_event("phase", {"name": "critic"})
                 crit = cmd_step(client, cfg, state, "critic",
-                    "Проверь созданную архитектуру, дай вердикт.")
+                    "Проверь созданную архитектуру, дай вердикт.", on_event=on_event)
                 result["message"] += "\n\n" + _print_banner("КРИТИК", crit["payload"])
                 state.phase = "roadmap"
                 state.save()
         elif phase == "roadmap":
+            if on_event:
+                on_event("phase", {"name": "planner"})
             step = cmd_step(client, cfg, state, "planner",
-                "Составь этапы и 3-5 детальных задач для первого этапа.")
+                "Составь этапы и 3-5 детальных задач для первого этапа.", on_event=on_event)
             result["message"] = _print_banner("ПЛАНИРОВЩИК", step["payload"])
             result["payload"] = step["payload"]
             from .planning import validate_plan
@@ -87,7 +95,7 @@ def run_phase_step(root: Path, cfg: RuntimeConfig | None = None, state: ProjectS
                 return result
             from .implementation import TaskEngine
             eng = TaskEngine(state, cfg, client)
-            cycle = eng.complete_task_cycle(task)
+            cycle = eng.complete_task_cycle(task, on_event=on_event)
             result["message"] = "ЦИКЛ ЗАДАЧИ:\n" + json.dumps(cycle, ensure_ascii=False, indent=2)[:4000]
             result["payload"] = cycle
             if cycle.get("status") == "critical_change":
@@ -101,7 +109,7 @@ def run_phase_step(root: Path, cfg: RuntimeConfig | None = None, state: ProjectS
                 return result
             from .implementation import TaskEngine
             eng = TaskEngine(state, cfg, client)
-            out = eng.run_review(task)
+            out = eng.run_review(task, on_event=on_event)
             result["message"] = "REVIEW:\n" + json.dumps(out, ensure_ascii=False, indent=2)[:2000]
             result["payload"] = out
         else:

@@ -31,7 +31,7 @@ class TaskEngine:
         self.client = client
         self.root = state.root
 
-    def run_task(self, task: Task, expected_branch: str = "main", run_checks: bool = True) -> dict:
+    def run_task(self, task: Task, expected_branch: str = "main", run_checks: bool = True, on_event=None) -> dict:
         errs = preflight(self.root, expected_branch=expected_branch, allow_dirty=True)
         if errs and expected_branch:
             raise PreflightError("PREFLIGHT FAIL:\n" + "\n".join(errs))
@@ -56,7 +56,7 @@ class TaskEngine:
                 f"Файлы по плану: {', '.join(task.files) or '(не заданы)'}\n"
                 "Если задача противоречит архитектуре — сначала вызови critical_change и не пиши код."
             )
-            run = AgentRun(self.client, role, self.root, sys_prompt, user, tools)
+            run = AgentRun(self.client, role, self.root, sys_prompt, user, tools, on_event=on_event)
             result = asyncio.run(run.run())
             meta = {"requests": run.requests, "tokens": run.total_tokens}
 
@@ -94,7 +94,7 @@ class TaskEngine:
         except Exception as e:
             return f"check failed: {e}"
 
-    def run_review(self, task: Task) -> dict:
+    def run_review(self, task: Task, on_event=None) -> dict:
         role = self.cfg.roles["reviewer"]
         tools = ToolExecutor(
             self.root,
@@ -104,7 +104,7 @@ class TaskEngine:
         )
         sys_prompt = ROLE_PROMPTS["reviewer"]["system"].format(project=self.state.name)
         user = f"Проверь задачу {task.id}: {task.title}\n\n{task.description}"
-        run = AgentRun(self.client, role, self.root, sys_prompt, user, tools)
+        run = AgentRun(self.client, role, self.root, sys_prompt, user, tools, on_event=on_event)
         result = asyncio.run(run.run())
         return {"result": result, "requests": run.requests, "tokens": run.total_tokens}
 
@@ -123,12 +123,14 @@ class TaskEngine:
         except Exception as e:
             return f"commit error: {e}"
 
-    def complete_task_cycle(self, task: Task) -> dict:
+    def complete_task_cycle(self, task: Task, on_event=None) -> dict:
         """Полный цикл: реализация → проверки → (исправления до 3) → review → commit → roadmap."""
         cycle = {"attempts": 0, "steps": []}
         for attempt in range(1, MAX_FIX_CYCLES + 1):
             cycle["attempts"] = attempt
-            out = self.run_task(task, run_checks=True)
+            if on_event:
+                on_event("phase", {"name": f"реализация (попытка {attempt})"})
+            out = self.run_task(task, run_checks=True, on_event=on_event)
             cycle["steps"].append(out)
 
             if out.get("critical_change"):
@@ -154,7 +156,9 @@ class TaskEngine:
             cycle["status"] = "checks_failed"
             return cycle
 
-        review = self.run_review(task)
+        if on_event:
+            on_event("phase", {"name": "review"})
+        review = self.run_review(task, on_event=on_event)
         cycle["review"] = review
         cycle["commit"] = self.commit_task(task)
         task.status = "done"

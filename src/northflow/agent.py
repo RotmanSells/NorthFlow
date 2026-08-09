@@ -33,6 +33,7 @@ class AgentRun:
         system_prompt: str,
         user_message: str,
         tools: ToolExecutor | None = None,
+        on_event=None,
     ):
         self.client = client
         self.role = role
@@ -40,6 +41,7 @@ class AgentRun:
         self.system_prompt = system_prompt
         self.user_message = user_message
         self.tools = tools or ToolExecutor(root, role=role.name, allowed_paths=role.allowed_paths)
+        self.on_event = on_event
         self.requests = 0
         self.total_tokens = 0
         self.started_at = time.monotonic()
@@ -47,6 +49,8 @@ class AgentRun:
         self._recent_signatures: list[str] = []
         self._useful_tool_count = 0
         self._useless_streak = 0
+        if self.on_event:
+            self._emit("start", {"role": role.name, "message": user_message[:500]})
 
     @property
     def elapsed(self) -> float:
@@ -58,6 +62,13 @@ class AgentRun:
         if self.elapsed >= self.role.budget.max_seconds:
             return f"PARTIAL: role time limit reached ({int(self.elapsed)}s) with result so far."
         return None
+
+    def _emit(self, kind: str, data: dict) -> None:
+        if self.on_event:
+            try:
+                self.on_event(kind, data)
+            except Exception:
+                pass
 
     def _mark_tool_used(self, result: str) -> None:
         """Считаем инструмент полезным, если он что-то изменил/принёс данные, а не просто ошибся."""
@@ -88,6 +99,7 @@ class AgentRun:
             limit_msg = self._check_limits()
             if limit_msg:
                 self.log.append({"event": "limit", "message": limit_msg})
+                self._emit("limit", {"message": limit_msg})
                 return limit_msg
             if self._useless_streak >= self.IDLE_TOOL_LIMIT:
                 msg = (
@@ -95,8 +107,10 @@ class AgentRun:
                     "инструментов подряд без полезного эффекта)."
                 )
                 self.log.append({"event": "stuck", "message": msg})
+                self._emit("stuck", {"message": msg})
                 return msg
 
+            self._emit("thinking", {"request": self.requests + 1})
             try:
                 resp = await self.client.chat(
                     messages, model=self.role.model or None,
@@ -104,6 +118,7 @@ class AgentRun:
                 )
             except Exception as e:
                 self.log.append({"event": "provider_error", "error": str(e)})
+                self._emit("error", {"message": str(e)})
                 return f"ERROR: provider call failed: {e}"
 
             self.requests += 1
@@ -113,6 +128,8 @@ class AgentRun:
             if not resp.tool_calls:
                 text = resp.content or "(empty)"
                 self.log.append({"event": "final_text", "text": text[:2000]})
+                self._emit("thinking", {"text": text[:2000]})
+                self._emit("finish", {"text": text[:2000]})
                 return text
 
             assistant_msg: dict = {
@@ -133,6 +150,7 @@ class AgentRun:
             messages.append(assistant_msg)
 
             for tc in resp.tool_calls:
+                self._emit("tool", {"tool": tc.name, "args": tc.arguments})
                 result = await self.tools.execute(tc.name, tc.arguments)
                 if len(result) > 30000:
                     result = result[:20000] + "\n… (truncated)\n" + result[-8000:]
@@ -142,16 +160,20 @@ class AgentRun:
                     "name": tc.name,
                     "content": result,
                 })
+                is_error = result.startswith("Ошибка:") or result.startswith("Error:")
                 self.log.append({"event": "tool", "tool": tc.name, "args": tc.arguments, "result": result[:500]})
+                self._emit("tool_result", {"tool": tc.name, "result": result[:2000], "is_error": is_error})
                 self._mark_tool_used(result)
                 sig = json.dumps({"n": tc.name, "a": tc.arguments}, sort_keys=True, ensure_ascii=False)
                 if self._detect_stuck(sig):
                     msg = "STUCK: роль повторяет одинаковые вызовы (зацикливание)."
                     self.log.append({"event": "stuck", "message": msg})
+                    self._emit("stuck", {"message": msg})
                     return msg
                 if tc.name == "finish":
                     payload = self.tools.finish_payload or {"result": result}
                     self.log.append({"event": "finish", "payload": payload})
+                    self._emit("finish", {"payload": payload})
                     return json.dumps(payload, ensure_ascii=False)
 
     async def close(self) -> None:
