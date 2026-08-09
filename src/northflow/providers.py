@@ -81,4 +81,7 @@ class LLMClient:
         )
 
     async def close(self) -> None:
-        await self.client.aclose()
+        try:
+            await self.client.aclose()
+        except Exception:
+            pass

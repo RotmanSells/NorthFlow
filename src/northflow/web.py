@@ -160,7 +160,7 @@ async function loadState(){
   try {
     state = await api('/api/state');
     document.getElementById('phasePill').textContent = 'Фаза: ' + state.phase;
-    document.getElementById('projectInfo').textContent = (state.name||'—') + '\nФаза: ' + state.phase + '\nОбновлено: ' + (state.updated_at||'—');
+    document.getElementById('projectInfo').textContent = (state.name||'—') + ' | Фаза: ' + state.phase + ' | Обновлено: ' + (state.updated_at||'—');
     renderStages();
     renderQuestions();
   } catch(e){ toast('Не удалось загрузить состояние: '+e, true); }
@@ -275,9 +275,9 @@ async function runStep(){
       if (done) break;
       buf += decoder.decode(value, {stream:true});
       let idx;
-      while((idx = buf.indexOf('\n\n')) >= 0){
+      while((idx = buf.indexOf(String.fromCharCode(10,10))) >= 0){
         const chunk = buf.slice(0, idx); buf = buf.slice(idx+2);
-        const line = chunk.split('\n').find(l=>l.startsWith('data: '));
+        const line = chunk.split(String.fromCharCode(10)).find(l=>l.startsWith('data: '));
         if (!line) continue;
         try {
           const ev = JSON.parse(line.slice(6));

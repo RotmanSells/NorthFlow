@@ -1,6 +1,7 @@
 """Оркестрация конвейера: исследование → вопросы → архитектура → этапы → задачи → реализация."""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import subprocess
@@ -35,7 +36,10 @@ def run_role_prompt(
     try:
         result = asyncio.run(run.run())
     finally:
-        asyncio.run(run.close())
+        try:
+            asyncio.run(run.close())
+        except Exception:
+            pass
     return result, {"requests": run.requests, "tokens": run.total_tokens, "log": run.log}
 
 

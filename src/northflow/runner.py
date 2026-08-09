@@ -127,7 +127,10 @@ def run_phase_step(root: Path, cfg: RuntimeConfig | None = None, state: ProjectS
         result["ok"] = False
         result["message"] = f"Ошибка: {type(e).__name__}: {e}"
     finally:
-        asyncio.run(client.close())
+        try:
+            asyncio.run(client.close())
+        except Exception:
+            pass
     return result
 
 
