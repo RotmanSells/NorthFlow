@@ -69,6 +69,8 @@ PAGE = """<!DOCTYPE html>
   .loading.show { display: flex; }
   .spinner { width: 16px; height: 16px; border: 2px solid #2a3446; border-top-color: #6ea8ff; border-radius: 50%; animation: spin .8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .sound-btn { background: #18202c; color: #e8eaf0; border: 1px solid #2a3446; border-radius: 7px; padding: 8px 12px; font-size: 13px; cursor: pointer; }
+  .sound-btn.muted { opacity: .5; }
   @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } .side { border-right: none; border-bottom: 1px solid #1e2430; } }
 </style>
 </head>
@@ -78,6 +80,7 @@ PAGE = """<!DOCTYPE html>
   <span class="phase-pill" id="phasePill">—</span>
   <div class="actions">
     <div class="loading" id="loading"><span class="spinner"></span><span>Агент работает…</span></div>
+    <button id="btnSound" class="sound-btn" title="Звук: вкл/выкл">🔔</button>
     <button id="btnRefresh">Обновить</button>
     <button id="btnRun" class="primary">Следующий шаг</button>
   </div>
@@ -109,6 +112,33 @@ async function api(path, opts={}) {
 function esc(s){ return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function toast(msg, err=false){ const t=document.getElementById('toast'); t.textContent=msg; t.style.display='block'; t.style.background=err?'#3a1d1d':'#1b2230'; setTimeout(()=>t.style.display='none', 6000); }
 
+let soundOn = localStorage.getItem('nf_sound') !== 'off';
+function setSoundBtn(){ const b=document.getElementById('btnSound'); b.textContent = soundOn ? '🔔' : '🔕'; b.classList.toggle('muted', !soundOn); }
+document.getElementById('btnSound').onclick = ()=>{ soundOn=!soundOn; localStorage.setItem('nf_sound', soundOn?'on':'off'); setSoundBtn(); if(soundOn) beep('done'); };
+let audioCtx = null;
+function ensureAudio(){ if(!audioCtx) { try { audioCtx = new (window.AudioContext||window.webkitAudioContext)(); } catch(e){} } if(audioCtx && audioCtx.state==='suspended') audioCtx.resume(); }
+function tone(freq, start, dur, vol=0.18, type='sine'){
+  if(!audioCtx) return;
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(0, audioCtx.currentTime + start);
+  g.gain.linearRampToValueAtTime(vol, audioCtx.currentTime + start + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + start + dur);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(audioCtx.currentTime + start); o.stop(audioCtx.currentTime + start + dur + 0.05);
+}
+function beep(kind){
+  if(!soundOn) return;
+  ensureAudio();
+  if(kind==='question'){ tone(660,0,0.14); tone(880,0.18,0.2); }
+  else if(kind==='error'){ tone(220,0,0.2); tone(180,0.25,0.3); }
+  else { tone(523,0,0.12); tone(659,0.15,0.12); tone(784,0.3,0.22); }
+}
+function notify(msg){
+  if(Notification && Notification.permission==='granted') { try { new Notification('NorthFlow', {body: msg, silent: true}); } catch(e){} }
+}
+function askSoundPermission(){ if(Notification && Notification.permission==='default') Notification.requestPermission(); }
+
 async function loadState(){
   try {
     state = await api('/api/state');
@@ -135,7 +165,9 @@ function renderStages(){
 function renderQuestions(){
   const card = document.getElementById('questionsCard');
   const qs = state.pending_questions || [];
+  const wasHidden = card.style.display === 'none' || !card.style.display;
   card.style.display = qs.length ? 'block' : 'none';
+  if (qs.length && wasHidden) { beep('question'); notify('Агент задал вопросы — нужен ответ'); }
   if (!qs.length) return;
   const el = document.getElementById('questions');
   el.innerHTML='';
@@ -177,7 +209,7 @@ async function runStep(){
     const res = await api('/api/run', {method:'POST'});
     toast(res.message || 'Готово');
   } catch(e){ toast('Ошибка: '+e, true); }
-  finally { btn.disabled=false; document.getElementById('loading').classList.remove('show'); await loadState(); await loadMemory(); }
+  finally { btn.disabled=false; document.getElementById('loading').classList.remove('show'); await loadState(); await loadMemory(); if(res && res.ok){ beep('done'); notify(res.message ? res.message.slice(0,120) : 'Шаг завершён'); } else if(res){ beep('error'); } }
 }
 async function loadMemory(){
   try {
@@ -208,7 +240,7 @@ document.getElementById('btnMemory').onclick = async ()=>{
   const res = await api('/api/state'); // просто проверка
   document.getElementById('logList').scrollIntoView({behavior:'smooth'});
 };
-loadState(); loadMemory();
+setSoundBtn(); askSoundPermission(); loadState(); loadMemory();
 </script>
 </body>
 </html>
