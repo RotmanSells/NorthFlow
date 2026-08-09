@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 
 from .checks import check_command, is_allowed_write_path
+from .memory_tools import MemoryTools
 
 
 def _tool(name: str, description: str, props: dict, required: list[str]) -> dict:
@@ -61,6 +62,7 @@ class ToolExecutor:
         memory: dict | None = None,
         allowed_paths: list[str] | None = None,
         role: str = "",
+        memory_db: MemoryTools | None = None,
     ):
         self.root = root.resolve()
         self.memory = memory or {}
@@ -71,6 +73,9 @@ class ToolExecutor:
         self.events: list[dict] = []
         self.finish_payload: dict | None = None
         self.critical_change: dict | None = None
+        self.memory_tools = memory_db
+        if self.memory_tools is not None:
+            self.memory_tools.set_role(role)
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -110,9 +115,20 @@ class ToolExecutor:
             if name == "web_fetch":
                 return await self._web_fetch(args["url"])
             if name == "memory_store":
+                if self.memory_tools is not None:
+                    res = self.memory_tools.store(
+                        content=args.get("value", ""),
+                        kind=args.get("kind", "fact"),
+                        tags=args.get("tags") or [],
+                        source_role=self.role,
+                    )
+                    return f"Сохранено в память: #{res['memory_id']} — {args.get('key', '')}"
                 self.memory[args["key"]] = args["value"]
                 return f"Сохранено в память: {args['key']}"
             if name == "memory_recall":
+                if self.memory_tools is not None:
+                    res = self.memory_tools.recall(args.get("query", ""), top_k=5)
+                    return _format_memory_results(res["results"])
                 q = args["query"].lower()
                 hits = [f"{k}: {v}" for k, v in self.memory.items() if q in k.lower() or q in str(v).lower()]
                 return "\n".join(hits[:10]) or "Совпадений в памяти нет."

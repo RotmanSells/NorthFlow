@@ -15,6 +15,7 @@ from .pipeline import cmd_step, ensure_commit, make_client, preflight_or_stop
 from .providers import LLMClient
 from .roles import extract_json
 from .planning import validate_plan
+from .memory import MemoryDB
 from .state import ProjectState, Stage, Task
 
 
@@ -158,6 +159,85 @@ def roadmap(project_dir: str):
     state = ProjectState.load(Path(project_dir).resolve())
     write_roadmap(state)
     click.echo("roadmap.md обновлён")
+
+
+
+@cli.group()
+def memory():
+    """Память проекта: лог операций агентов."""
+
+
+@memory.command("log")
+@click.argument("project_dir", default=".")
+@click.option("--limit", default=50, help="Сколько записей показать.")
+@click.option("--role", default="", help="Фильтр по роли.")
+@click.option("--action", default="", help="Фильтр по действию: store/recall/relation.")
+def memory_log_cmd(project_dir: str, limit: int, role: str, action: str):
+    """Показать журнал обращений к памяти."""
+    root = Path(project_dir).resolve()
+    db = MemoryDB(root / "memory.db")
+    try:
+        rows = db.list_memory_log(limit=limit, role=role, action=action)
+        if not rows:
+            click.echo("Записей пока нет.")
+            return
+        for r in rows:
+            preview = (r["query"] or "").replace("\n", " ")[:80]
+            click.echo(f"#{r['id']} [{r['created_at']}] {r['role']} / {r['action']}: {preview}")
+    finally:
+        db.close()
+
+
+@memory.command("show")
+@click.argument("log_id", type=int)
+@click.argument("project_dir", default=".")
+def memory_show_cmd(log_id: int, project_dir: str):
+    """Показать детали одной записи журнала."""
+    root = Path(project_dir).resolve()
+    db = MemoryDB(root / "memory.db")
+    try:
+        r = db.get_memory_log(log_id)
+        if not r:
+            click.echo(f"Запись #{log_id} не найдена.")
+            return
+        click.echo(f"# {r['id']} — {r['role']} / {r['action']}")
+        click.echo(f"Время: {r['created_at']}")
+        click.echo(f"Запрос: {r['query']}")
+        click.echo(f"Параметры: {r['request_detail']}")
+        click.echo("Ответ:")
+        click.echo(r["response_detail"] or "(пусто)")
+        click.echo(f"Memory IDs: {r['memory_ids']}")
+    finally:
+        db.close()
+
+
+@memory.command("stats")
+@click.argument("project_dir", default=".")
+def memory_stats_cmd(project_dir: str):
+    """Показать статистику памяти."""
+    root = Path(project_dir).resolve()
+    db = MemoryDB(root / "memory.db")
+    try:
+        click.echo(json.dumps(db.stats(), ensure_ascii=False, indent=2))
+        log_count = db.db.execute("SELECT COUNT(*) AS c FROM memory_log").fetchone()["c"]
+        click.echo(f"log_entries: {log_count}")
+    finally:
+        db.close()
+
+
+@memory.command("dashboard")
+@click.argument("project_dir", default=".")
+@click.option("--output", default=None, help="Куда сохранить HTML.")
+@click.option("--open", "open_browser", is_flag=True, help="Открыть в браузере.")
+def memory_dashboard_cmd(project_dir: str, output: str | None, open_browser: bool):
+    """Собрать веб-дашборд обращений к памяти."""
+    from .dashboard import render_dashboard
+    root = Path(project_dir).resolve()
+    out = render_dashboard(root, output)
+    click.echo(f"Дашборд: {out}")
+    if open_browser:
+        import webbrowser
+        webbrowser.open(out.resolve().as_uri())
 
 
 if __name__ == "__main__":

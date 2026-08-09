@@ -67,6 +67,17 @@ CREATE TABLE IF NOT EXISTS episode_events (
     created_at TEXT,
     FOREIGN KEY(episode_id) REFERENCES episodes(id)
 );
+
+CREATE TABLE IF NOT EXISTS memory_log (
+    id INTEGER PRIMARY KEY,
+    role TEXT,
+    action TEXT,
+    query TEXT,
+    request_detail TEXT,
+    response_detail TEXT,
+    memory_ids TEXT DEFAULT '[]',
+    created_at TEXT
+);
 """
 
 REL_TYPES = {
@@ -167,6 +178,7 @@ class MemoryDB:
         self.db.commit()
         self.embedder = embedder or NGramEmbedder()
         self.vec_loaded = self._try_load_sqlite_vec()
+        self._last_role: str = ""
 
     def close(self) -> None:
         self.db.close()
@@ -241,6 +253,14 @@ class MemoryDB:
         )
         self.db.commit()
         self._sync_vec_index()
+        self.log_memory_op(
+            role=source_role,
+            action="store",
+            query=content,
+            request_detail=f"kind={kind}, tags={json.dumps(list(tags), ensure_ascii=False)}",
+            response_detail=f"memory_id={cur.lastrowid}",
+            memory_ids=[cur.lastrowid],
+        )
         return cur.lastrowid
 
     def add_relation(self, from_id: int, to_id: int, rel_type: str, note: str = "") -> int:
@@ -250,6 +270,13 @@ class MemoryDB:
             (from_id, to_id, rel_type, note, now_iso()),
         )
         self.db.commit()
+        self.log_memory_op(
+            role=self._last_role or "system",
+            action="relation",
+            query=f"{from_id} -> {to_id}",
+            request_detail=rel_type,
+            response_detail=note,
+        )
         return cur.lastrowid
 
     def recall(
@@ -328,7 +355,19 @@ class MemoryDB:
         for _score, r in picked:
             self.db.execute("UPDATE memories SET access_count = access_count + 1 WHERE id = ?", (r["id"],))
         self.db.commit()
-        return result[: top_k * (1 + expand_relations)]
+        final = result[: top_k * (1 + expand_relations)]
+        self.log_memory_op(
+            role=self._last_role or "system",
+            action="recall",
+            query=query,
+            request_detail=f"top_k={top_k}, expand_relations={expand_relations}",
+            response_detail=json.dumps(
+                [{"id": m["id"], "content": m["content"][:200], "source": m.get("source")} for m in final],
+                ensure_ascii=False,
+            ),
+            memory_ids=[m["id"] for m in final],
+        )
+        return final
 
     def related(self, memory_id: int, limit: int = 5) -> list[dict]:
         rows = self.db.execute(
@@ -423,6 +462,51 @@ class MemoryDB:
         r = self.db.execute("SELECT COUNT(*) AS c FROM relations").fetchone()["c"]
         e = self.db.execute("SELECT COUNT(*) AS c FROM episodes").fetchone()["c"]
         return {"memories": m, "relations": r, "episodes": e}
+
+    # --- memory log ---------------------------------------------------
+
+    def log_memory_op(
+        self,
+        role: str,
+        action: str,
+        query: str = "",
+        request_detail: str = "",
+        response_detail: str = "",
+        memory_ids: list[int] | None = None,
+    ) -> int:
+        cur = self.db.execute(
+            "INSERT INTO memory_log(role, action, query, request_detail, response_detail, memory_ids, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                role or "system",
+                action,
+                query[:1000],
+                request_detail[:2000],
+                response_detail[:5000],
+                json.dumps(memory_ids or [], ensure_ascii=False),
+                now_iso(),
+            ),
+        )
+        self.db.commit()
+        return cur.lastrowid
+
+    def list_memory_log(self, limit: int = 50, role: str = "", action: str = "") -> list[dict]:
+        sql = "SELECT * FROM memory_log WHERE 1=1"
+        params: list = []
+        if role:
+            sql += " AND role = ?"
+            params.append(role)
+        if action:
+            sql += " AND action = ?"
+            params.append(action)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        rows = self.db.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_memory_log(self, log_id: int) -> dict | None:
+        row = self.db.execute("SELECT * FROM memory_log WHERE id = ?", (log_id,)).fetchone()
+        return dict(row) if row else None
 
 
 def memory_to_dict(row: sqlite3.Row, score: float | None = None, source: str = "memory") -> dict:
