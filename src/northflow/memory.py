@@ -5,6 +5,11 @@ MVP без внешних серверов:
 - relations — связи между фактами (граф);
 - episodes  — эпизодическая память: что делал агент, сколько запросов/токенов;
 - recall    — гибрид: вектор + ключевые слова + расширение по связям.
+
+Производительность: по умолчанию гибридный recall сначала сужает кандидатов
+по BM25-подобному ключевому скорингу (быстро, без индекса), потом считает
+косинус только по кандидатам. Если доступен sqlite-vec loadable extension —
+используется vec0 ANN-индекс. Всё остальное работает без внешних пакетов.
 """
 from __future__ import annotations
 
@@ -18,6 +23,8 @@ from pathlib import Path
 from typing import Iterable
 
 EMBEDDING_DIM = 256
+_CANDIDATE_SCAN_LIMIT = 400   # максимум кандидатов для полного векторного скоринга
+_KW_CANDIDATE_LIMIT = 80      # минимум кандидатов по ключевым словам
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
@@ -133,6 +140,19 @@ def tokenize(text: str) -> set[str]:
     return set(re.findall(r"[a-zа-яё0-9_]+", text.lower()))
 
 
+def _bm25ish(content: str, query_tokens: set[str]) -> float:
+    """Лёгкий ключевой скор без полнотекстового индекса: пересечение + плотность."""
+    if not query_tokens:
+        return 0.0
+    tokens = tokenize(content)
+    if not tokens:
+        return 0.0
+    overlap = len(query_tokens & tokens)
+    if overlap == 0:
+        return 0.0
+    return overlap / math.sqrt(len(tokens))
+
+
 # ---------------------------------------------------------------- storage
 
 class MemoryDB:
@@ -146,9 +166,54 @@ class MemoryDB:
         self.db.executescript(_SCHEMA)
         self.db.commit()
         self.embedder = embedder or NGramEmbedder()
+        self.vec_loaded = self._try_load_sqlite_vec()
 
     def close(self) -> None:
         self.db.close()
+
+    # --- optional ANN -------------------------------------------------
+
+    def _try_load_sqlite_vec(self) -> bool:
+        """Пытается загрузить sqlite-vec. Возвращает True, если ANN доступен."""
+        try:
+            import sqlite_vec
+            self.db.enable_load_extension(True)
+            sqlite_vec.load(self.db)
+            self.db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec USING vec0(embedding float[256])")
+            return True
+        except Exception:
+            return False
+
+    def _ann_candidates(self, q_vec: list[float], top_k: int) -> list[dict]:
+        if not self.vec_loaded:
+            return []
+        try:
+            import sqlite_vec as _sv
+            rows = self.db.execute(
+                "SELECT rowid FROM memories_vec ORDER BY embedding LIMIT ?",
+                (_sv.serialize_float32(q_vec), top_k * 4),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def _sync_vec_index(self) -> None:
+        """Пересинхронизирует ANN-таблицу (полная перезапись, вызывается при store)."""
+        if not self.vec_loaded:
+            return
+        try:
+            self.db.execute("DELETE FROM memories_vec")
+            for r in self.db.execute("SELECT id, embedding FROM memories").fetchall():
+                vec = json.loads(r["embedding"] or "[]")
+                if vec:
+                    import sqlite_vec as _sv
+                    self.db.execute(
+                        "INSERT INTO memories_vec(rowid, embedding) VALUES (?, ?)",
+                        (r["id"], _sv.serialize_float32(vec)),
+                    )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
 
     # --- memories -----------------------------------------------------
 
@@ -175,6 +240,7 @@ class MemoryDB:
             ),
         )
         self.db.commit()
+        self._sync_vec_index()
         return cur.lastrowid
 
     def add_relation(self, from_id: int, to_id: int, rel_type: str, note: str = "") -> int:
@@ -192,19 +258,46 @@ class MemoryDB:
         top_k: int = 5,
         expand_relations: int = 1,
     ) -> list[dict]:
-        rows = self.db.execute("SELECT * FROM memories").fetchall()
-        if not rows:
-            return []
-        q_vec = self.embedder.embed(query)
         q_tokens = tokenize(query)
-        scored: list[tuple[float, sqlite3.Row]] = []
+        q_vec = self.embedder.embed(query)
+
+        # 1) Быстрые кандидаты: BM25-подобный скор, потом ANN, потом полный скан.
+        rows = self.db.execute("SELECT * FROM memories").fetchall()
+        kw_scored: list[tuple[float, sqlite3.Row]] = []
         for r in rows:
+            s = _bm25ish(r["content"], q_tokens)
+            if s > 0:
+                kw_scored.append((s, r))
+        kw_scored.sort(key=lambda x: x[0], reverse=True)
+        kw_cands = [r for _s, r in kw_scored[: _KW_CANDIDATE_LIMIT]]
+
+        ann_ids = {r["rowid"] for r in self._ann_candidates(q_vec, top_k)}
+        cand_map = {r["id"]: r for r in rows}
+        ann_rows = [cand_map[i] for i in ann_ids if i in cand_map]
+        # Объединяем: ANN-кандидаты + ключевые кандидаты + (если мало) свежие.
+        merged: list[sqlite3.Row] = []
+        seen_ids: set[int] = set()
+        for r in ann_rows + kw_cands:
+            if r["id"] not in seen_ids:
+                seen_ids.add(r["id"])
+                merged.append(r)
+        if len(merged) < _CANDIDATE_SCAN_LIMIT:
+            # Полный скан только если кандидатов мало; иначе оставляем суженный набор.
+            full = rows
+            for r in full:
+                if r["id"] not in seen_ids:
+                    seen_ids.add(r["id"])
+                    merged.append(r)
+        candidates = merged[:_CANDIDATE_SCAN_LIMIT]
+
+        # 2) Полный гибридный скор по кандидатам.
+        scored: list[tuple[float, sqlite3.Row]] = []
+        for r in candidates:
             vec = json.loads(r["embedding"] or "[]")
             if not vec:
                 vec = self.embedder.embed(r["content"])
             vec_score = cosine(q_vec, vec)
-            content_tokens = tokenize(r["content"])
-            kw = len(q_tokens & content_tokens) / max(1, len(q_tokens))
+            kw = len(q_tokens & tokenize(r["content"])) / max(1, len(q_tokens))
             recency = 0.0
             try:
                 created = datetime.fromisoformat(r["created_at"]).timestamp()
@@ -222,15 +315,13 @@ class MemoryDB:
 
         scored.sort(key=lambda x: x[0], reverse=True)
         picked = scored[:top_k]
-        result = []
+        result: list[dict] = []
         seen: set[int] = set()
         for score, r in picked:
             seen.add(r["id"])
-            result.append(memory_to_dict(r, score))
-            # расширение по связям
+            result.append(memory_to_dict(r, score, source="semantic"))
             if expand_relations > 0:
-                related = self.related(r["id"], limit=expand_relations)
-                for rel in related:
+                for rel in self.related(r["id"], limit=expand_relations):
                     if rel["to_id"] not in seen:
                         seen.add(rel["to_id"])
                         result.append(rel)
@@ -255,6 +346,7 @@ class MemoryDB:
                 "rel_type": row["rel_type"],
                 "note": row["note"],
                 "score": None,
+                "source": f"related:{row['rel_type']}",
             }
             for row in rows
         ]
@@ -263,6 +355,7 @@ class MemoryDB:
         self.db.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
         self.db.execute("DELETE FROM relations WHERE from_id = ? OR to_id = ?", (memory_id, memory_id))
         self.db.commit()
+        self._sync_vec_index()
 
     def list_memories(self, limit: int = 50) -> list[dict]:
         rows = self.db.execute(
@@ -297,6 +390,30 @@ class MemoryDB:
         )
         self.db.commit()
 
+    def delete_episode(self, episode_id: int) -> None:
+        self.db.execute("DELETE FROM episode_events WHERE episode_id = ?", (episode_id,))
+        self.db.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
+        self.db.commit()
+
+    def delete_episodes_before(self, before_iso: str) -> int:
+        cur = self.db.execute(
+            "SELECT id FROM episodes WHERE created_at < ?", (before_iso,)
+        ).fetchall()
+        ids = [r["id"] for r in cur]
+        for eid in ids:
+            self.db.execute("DELETE FROM episode_events WHERE episode_id = ?", (eid,))
+        self.db.execute("DELETE FROM episodes WHERE created_at < ?", (before_iso,))
+        self.db.commit()
+        return len(ids)
+
+    def prune_episodes(self, keep_last: int = 200) -> int:
+        """Удаляет самые старые эпизоды, оставляя keep_last последних."""
+        rows = self.db.execute("SELECT id FROM episodes ORDER BY id DESC LIMIT -1 OFFSET ?", (keep_last,)).fetchall()
+        ids = [r["id"] for r in rows]
+        for eid in ids:
+            self.delete_episode(eid)
+        return len(ids)
+
     def list_episodes(self, limit: int = 20) -> list[dict]:
         rows = self.db.execute("SELECT * FROM episodes ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
@@ -308,7 +425,7 @@ class MemoryDB:
         return {"memories": m, "relations": r, "episodes": e}
 
 
-def memory_to_dict(row: sqlite3.Row, score: float | None = None) -> dict:
+def memory_to_dict(row: sqlite3.Row, score: float | None = None, source: str = "memory") -> dict:
     return {
         "id": row["id"],
         "content": row["content"],
@@ -319,6 +436,7 @@ def memory_to_dict(row: sqlite3.Row, score: float | None = None) -> dict:
         "created_at": row["created_at"],
         "access_count": row["access_count"],
         "score": score,
+        "source": source,
     }
 
 
