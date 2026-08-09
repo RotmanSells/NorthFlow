@@ -34,6 +34,7 @@ class AgentRun:
         user_message: str,
         tools: ToolExecutor | None = None,
         on_event=None,
+        request_approval=None,
     ):
         self.client = client
         self.role = role
@@ -41,7 +42,10 @@ class AgentRun:
         self.system_prompt = system_prompt
         self.user_message = user_message
         self.tools = tools or ToolExecutor(root, role=role.name, allowed_paths=role.allowed_paths)
+        if self.tools is not None:
+            self.tools.request_approval = request_approval
         self.on_event = on_event
+        self.request_approval = request_approval
         self.requests = 0
         self.total_tokens = 0
         self.started_at = time.monotonic()

@@ -11,6 +11,7 @@ import queue
 import threading
 from pathlib import Path
 
+from .approval import ApprovalManager, ApprovalWaiter
 from .runner import run_phase_step
 
 
@@ -22,14 +23,17 @@ class StreamSession:
         self.config = config
         self.q: queue.Queue[dict | None] = queue.Queue()
         self._thread: threading.Thread | None = None
+        self.approvals = ApprovalManager()
+        self._waiter = None
 
     def _on_event(self, kind: str, data: dict) -> None:
         self.q.put({"type": kind, "data": data})
 
     def start(self) -> None:
+        self._waiter = ApprovalWaiter(self.approvals, self._on_event)
         def worker():
             try:
-                result = run_phase_step(self.root, config_path=self.config, on_event=self._on_event)
+                result = run_phase_step(self.root, config_path=self.config, on_event=self._on_event, request_approval=self._waiter)
                 self.q.put({"type": "done", "data": result})
             except Exception as e:
                 self.q.put({"type": "done", "data": {"ok": False, "message": str(e)}})

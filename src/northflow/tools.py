@@ -74,6 +74,7 @@ class ToolExecutor:
         self.finish_payload: dict | None = None
         self.critical_change: dict | None = None
         self.memory_tools = memory_db
+        self.request_approval = None
         if self.memory_tools is not None:
             self.memory_tools.set_role(role)
 
@@ -101,7 +102,7 @@ class ToolExecutor:
         self.events.append({"tool": name, "args": args})
         try:
             if name == "shell_exec":
-                return await self._shell(args.get("command", ""))
+                return await self._shell_guarded(args.get("command", ""))
             if name == "read_file":
                 return self._read(args["path"])
             if name in WRITE_TOOLS:
@@ -150,10 +151,18 @@ class ToolExecutor:
         except Exception as e:
             return f"Ошибка: {type(e).__name__}: {e}"
 
-    async def _shell(self, command: str) -> str:
+    async def _shell_guarded(self, command: str) -> str:
+        """Выполняет команду, если она разрешена; для опасных/новых команд спрашивает человека."""
         bad = check_command(command)
         if bad:
             return f"Ошибка: команда запрещена политикой ({bad})."
+        if self.request_approval is not None:
+            allowed = await self.request_approval(command)
+            if not allowed:
+                return "Ошибка: команда отклонена человеком."
+        return await self._shell(command)
+
+    async def _shell(self, command: str) -> str:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,

@@ -19,7 +19,7 @@ def now_iso() -> str:
 
 def run_role_prompt(
     client, cfg: RuntimeConfig, state: ProjectState, role_name: str, user_message: str,
-    on_event=None,
+    on_event=None, request_approval=None,
 ) -> tuple[str, dict]:
     """Запускает роль и возвращает (итог, usage/журнал). on_event — колбэк событий."""
     role = cfg.roles[role_name]
@@ -31,7 +31,7 @@ def run_role_prompt(
     )
     tool_ctx = build_tool_context(state)
     full_user = user_message + "\n\n" + tool_ctx
-    run = AgentRun(client, role, state.root, sys_prompt, full_user, on_event=on_event)
+    run = AgentRun(client, role, state.root, sys_prompt, full_user, on_event=on_event, request_approval=request_approval)
     try:
         result = asyncio.run(run.run())
     finally:
@@ -86,8 +86,8 @@ def extract_json(text: str) -> dict | None:
         return None
 
 
-def cmd_step(client, cfg, state, role, message, on_event=None) -> dict:
-    result, meta = run_role_prompt(client, cfg, state, role, message, on_event=on_event)
+def cmd_step(client, cfg, state, role, message, on_event=None, request_approval=None) -> dict:
+    result, meta = run_role_prompt(client, cfg, state, role, message, on_event=on_event, request_approval=request_approval)
     payload = extract_json(result) or {"raw": result}
     return {"role": role, "result": result, "payload": payload, "meta": meta}
 

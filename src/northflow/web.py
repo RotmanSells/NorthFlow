@@ -75,6 +75,11 @@ PAGE = """<!DOCTYPE html>
   .stream .ev.error, .stream .ev.stuck, .stream .ev.limit { border-left-color:#e05252; color:#ff9d9d; }
   .stream .ev.finish { border-left-color:#3ecf8e; color:#7ee2a8; font-weight:600; }
   .stream .ev.done { border-top:1px solid #263040; color:#9aa3b2; margin-top:8px; }
+  .stream .ev.approval { border-left-color:#b48cff; color:#d4c4ff; }
+  .approve-box { display:flex; gap:10px; align-items:center; margin-top:8px; }
+  .approve-box button { font-size:12px; padding:6px 12px; }
+  .approve-box .yes { background:#1c4d32; border-color:#2f8a55; color:#c9f2d9; }
+  .approve-box .no { background:#4d1c1c; border-color:#8a2f2f; color:#f2c9c9; }
   .empty { color: #5d6675; padding: 20px 4px; font-size: 14px; }
   .loading { display: none; align-items: center; gap: 10px; color: #9fc4ff; font-size: 14px; }
   .loading.show { display: flex; }
@@ -226,10 +231,33 @@ function appendStream(type, data){
   else if (type === 'stuck') { txt = '🔄 Зацикливание: ' + (data.message||''); }
   else if (type === 'limit') { txt = '⏹ Лимит: ' + (data.message||''); }
   else if (type === 'finish') { txt = '✅ Готово: ' + JSON.stringify(data).slice(0,400); }
+  else if (type === 'approval_request') {
+    div.classList.add('approval');
+    const box = document.createElement('div');
+    box.className = 'approve-box';
+    const yes = document.createElement('button'); yes.className='yes'; yes.textContent='✅ Разрешить';
+    const no = document.createElement('button'); no.className='no'; no.textContent='❌ Отказать';
+    yes.onclick = ()=>sendApproval(data.token, true, yes, no);
+    no.onclick = ()=>sendApproval(data.token, false, yes, no);
+    box.appendChild(yes); box.appendChild(no);
+    div.textContent = '🔐 Нужно разрешение на команду: ' + String(data.command||'').slice(0,300);
+    div.appendChild(box);
+    el.appendChild(div);
+    el.scrollTop = el.scrollHeight;
+    beep('question'); notify('Агент запросил разрешение на команду');
+    return;
+  }
   else if (type === 'done') { txt = '🏁 ' + (data.ok ? 'Шаг завершён' : 'Ошибка: ' + (data.message||'')); div.classList.add('done'); }
   div.textContent = txt;
   el.appendChild(div);
   el.scrollTop = el.scrollHeight;
+}
+async function sendApproval(token, allowed, yesBtn, noBtn){
+  yesBtn.disabled = true; noBtn.disabled = true;
+  try {
+    const res = await api('/api/approve', {method:'POST', body: JSON.stringify({token, allowed})});
+    if (!res.ok) toast('Запрос уже обработан или не найден', true);
+  } catch(e){ toast('Ошибка: '+e, true); }
 }
 async function runStep(){
   const btn = document.getElementById('btnRun');
@@ -374,7 +402,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
-        session = StreamSession(self.server.root, self.server.config)
+        sid = str(id(self))
+        self.server.sessions[sid] = StreamSession(self.server.root, self.server.config)
+        session = self.server.sessions[sid]
         session.start()
         try:
             for ev in session.events():
@@ -383,6 +413,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             pass
+        finally:
+            self.server.sessions.pop(sid, None)
 
     def do_POST(self):
         if self.path == "/api/run":
@@ -398,6 +430,22 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json({"ok": False, "message": str(e)}, 422)
             return
+        if self.path == "/api/approve":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                data = json.loads(self.rfile.read(length).decode("utf-8"))
+                token = data.get("token", "")
+                allowed = bool(data.get("allowed", False))
+                # Разрешаем через активную StreamSession (если есть).
+                ok = False
+                for session in list(self.server.sessions.values()):
+                    if session.approvals.resolve(token, allowed):
+                        ok = True
+                        break
+                self._send_json({"ok": ok, "message": "Принято" if ok else "Запрос не найден"})
+            except Exception as e:
+                self._send_json({"ok": False, "message": str(e)}, 422)
+            return
         self._send_json({"error": "not found"}, 404)
 
 
@@ -410,6 +458,7 @@ class WebServer:
         self.httpd = ThreadingHTTPServer((host, port), Handler)
         self.httpd.root = self.root
         self.httpd.config = config
+        self.httpd.sessions = {}
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
 
     def start(self) -> None:
