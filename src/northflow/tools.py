@@ -152,11 +152,11 @@ class ToolExecutor:
             return f"Ошибка: {type(e).__name__}: {e}"
 
     async def _shell_guarded(self, command: str) -> str:
-        """Выполняет команду, если она разрешена; для опасных/новых команд спрашивает человека."""
+        """Выполняет команду; подтверждение человека только на удаление."""
         bad = check_command(command)
         if bad:
             return f"Ошибка: команда запрещена политикой ({bad})."
-        if self.request_approval is not None:
+        if self.request_approval is not None and is_delete_command(command):
             allowed = await self.request_approval(command)
             if not allowed:
                 return "Ошибка: команда отклонена человеком."
@@ -266,3 +266,9 @@ class ToolExecutor:
             return text[:80000]
         except Exception as e:
             return f"Ошибка: не удалось открыть страницу ({e})."
+
+
+def is_delete_command(command: str) -> bool:
+    """True, если команда что-то удаляет (rm, unlink, rmdir и т.п.)."""
+    import re as _re
+    return bool(_re.search(r"\b(rm|unlink|rmdir|del|remove)\b", command, _re.IGNORECASE))
