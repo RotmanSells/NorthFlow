@@ -58,6 +58,8 @@ class ProjectState:
     next_task_id: int = 1
     answers: dict = field(default_factory=dict)
     memory: dict = field(default_factory=dict)
+    pending_questions: list = field(default_factory=list)
+    pending_next_phase: str = ""
     updated_at: str = ""
 
     @classmethod
@@ -82,6 +84,8 @@ class ProjectState:
                 next_task_id=data.get("next_task_id", 1),
                 answers=data.get("answers", {}),
                 memory=data.get("memory", {}),
+                pending_questions=data.get("pending_questions", []),
+                pending_next_phase=data.get("pending_next_phase", ""),
                 updated_at=data.get("updated_at", ""),
             )
         return cls(root=root, name=root.name)
@@ -120,6 +124,8 @@ class ProjectState:
             "next_task_id": self.next_task_id,
             "answers": self.answers,
             "memory": self.memory,
+            "pending_questions": self.pending_questions,
+            "pending_next_phase": self.pending_next_phase,
             "updated_at": self.updated_at,
         }
         tmp = self.root / (STATE_FILENAME + ".tmp")

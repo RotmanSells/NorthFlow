@@ -72,73 +72,12 @@ def preflight_cmd(project_dir: str, expected_branch: str):
 @click.option("--config", default=None, help="Путь к конфигу.")
 def run(project_dir: str, config: str | None):
     """Прогнать следующий шаг конвейера."""
-    root = Path(project_dir).resolve()
-    cfg = load_config(config)
-    state = ProjectState.load(root)
-    client = make_client(cfg)
-
-    try:
-        if state.phase == "idea":
-            step = cmd_step(client, cfg, state, "researcher",
-                "Изучи docs/00-idea.md, проведи исследование, задай вопросы человеку.")
-            print("ИССЛЕДОВАНИЕ:", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
-            qs = questions_from_result(step["result"])
-            if qs:
-                ask_questions(state, qs)
-            state.phase = "architecture"
-            state.save()
-        elif state.phase == "architecture":
-            step = cmd_step(client, cfg, state, "architect",
-                "Составь полную документацию и AGENTS.md. Если нужны решения — задай вопросы человеку.")
-            print("АРХИТЕКТУРА:", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
-            qs = questions_from_result(step["result"])
-            if qs:
-                ask_questions(state, qs)
-                step = cmd_step(client, cfg, state, "architect",
-                    "Продолжи: с учётом ответов заверши документацию.")
-                print("АРХИТЕКТУРА (финал):", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
-            crit = cmd_step(client, cfg, state, "critic",
-                "Проверь созданную архитектуру, дай вердикт.")
-            print("КРИТИК:", json.dumps(crit["payload"], ensure_ascii=False, indent=2)[:2000])
-            state.phase = "roadmap"
-            state.save()
-        elif state.phase == "roadmap":
-            step = cmd_step(client, cfg, state, "planner",
-                "Составь этапы и 3-5 детальных задач для первого этапа.")
-            print("ПЛАНИРОВЩИК:", json.dumps(step["payload"], ensure_ascii=False, indent=2)[:2000])
-            errors = validate_plan(state)
-            if errors:
-                print("ПЛАН НЕ ПОЛНЫЙ:", "\n".join(errors[:20]))
-                print("Сначала исправь план, потом снова northflow run.")
-                return
-            state.phase = "implementation"
-            state.save()
-        elif state.phase == "implementation":
-            preflight_or_stop(state, cfg)
-            task = state.next_task()
-            if not task:
-                print("Все задачи этапа завершены. Закрой этап вручную в state.")
-                return
-            from .implementation import TaskEngine
-            eng = TaskEngine(state, cfg, client)
-            cycle = eng.complete_task_cycle(task)
-            print("ЦИКЛ ЗАДАЧИ:", json.dumps(cycle, ensure_ascii=False, indent=2)[:4000])
-            if cycle.get("status") == "critical_change":
-                print("Задача остановлена: нужен ответ человека.")
-        elif state.phase == "review":
-            preflight_or_stop(state, cfg)
-            task = state.next_task()
-            if not task:
-                print("Нет задач для review.")
-                return
-            from .implementation import TaskEngine
-            eng = TaskEngine(state, cfg, client)
-            out = eng.run_review(task)
-            print("REVIEW:", json.dumps(out, ensure_ascii=False, indent=2)[:2000])
-        else:
-            print(f"Фаза {state.phase} не обрабатывается автоматически.")
-    finally:
-        asyncio.run(client.close())
+    from .runner import run_phase_step
+    res = run_phase_step(Path(project_dir).resolve(), config_path=config)
+    if not res.get("ok"):
+        click.echo(res.get("message", "Ошибка"), err=True)
+        sys.exit(1)
+    click.echo(res.get("message", ""))
 
 
 @cli.command()
@@ -159,6 +98,27 @@ def roadmap(project_dir: str):
     state = ProjectState.load(Path(project_dir).resolve())
     write_roadmap(state)
     click.echo("roadmap.md обновлён")
+
+
+@cli.command()
+@click.argument("project_dir", default=".")
+@click.option("--config", default=None)
+@click.option("--host", default="127.0.0.1")
+@click.option("--port", default=8756)
+@click.option("--no-browser", is_flag=True, help="Не открывать браузер автоматически.")
+def web(project_dir: str, config: str | None, host: str, port: int, no_browser: bool):
+    """Запустить локальный веб-интерфейс."""
+    from .web import run_web
+    server = run_web(Path(project_dir).resolve(), config=config, host=host, port=port, open_browser=not no_browser)
+    click.echo(f"NorthFlow web: {server.url()}")
+    click.echo("Остановка: Ctrl+C")
+    try:
+        import time
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        server.stop()
+        click.echo("Остановлен.")
 
 
 
